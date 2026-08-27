@@ -81,6 +81,7 @@ const progressLabel = document.querySelector('#progress')
 const placeLabel = document.querySelector('#place')
 const levelLabel = document.querySelector('#level')
 const messagePanel = document.querySelector('#message')
+messagePanel.style.zIndex = '100'
 const countdownLabel = document.querySelector('#countdown')
 const messageTitle = document.querySelector('#message-title')
 const messageText = document.querySelector('#message-text')
@@ -119,6 +120,7 @@ labelRenderer.domElement.style.position = 'absolute'
 labelRenderer.domElement.style.top = '0'
 labelRenderer.domElement.style.left = '0'
 labelRenderer.domElement.style.pointerEvents = 'none'
+labelRenderer.domElement.style.zIndex = '1'
 gameShell.appendChild(labelRenderer.domElement)
 
 const ambientLight = new THREE.HemisphereLight(0xf4f7ff, 0x34503b, 1.9)
