@@ -761,7 +761,7 @@ function createNameLabel(text, color) {
 
 // Opciones de color para la antesala (evitando los colores ya usados por los rivales).
 const carColorOptions = [0x6a0dad, 0x1479ff, 0xe83e8c, 0x22d3ee, 0xf97316, 0x84cc16, 0xf43f5e, 0xf4f6fb]
-let pendingName = 'Derly'
+let pendingName = ''
 let pendingColor = carColorOptions[0]
 
 const playerCar = createCar({ color: pendingColor, accent: 0xdfe8f7 })
