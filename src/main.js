@@ -239,7 +239,7 @@ const trackLevels = [
   },
 ]
 
-const roadWidth = 18
+const roadWidth = 16
 const laneOffsets = [-6, -2, 2, 6]
 
 let curve
@@ -359,6 +359,7 @@ function createConeMesh() {
   stripe.position.y = 0.65
 
   group.add(base, cone, stripe)
+  group.scale.setScalar(1.3)
   return group
 }
 
@@ -383,6 +384,7 @@ function createBarrelMesh() {
   bandBottom.position.y = 0.25
 
   group.add(body, bandTop, bandBottom)
+  group.scale.setScalar(1.3)
   return group
 }
 
@@ -834,6 +836,8 @@ setupNameInput.addEventListener('input', () => {
 })
 
 setupStartButton.addEventListener('click', () => {
+  audioCtx.resume() // en Chrome hay que "despertar" el contexto de audio con un click del usuario
+  playMusic()
   const finalName = pendingName.trim() || 'Piloto'
 
   playerCar.userData.name = finalName
@@ -852,6 +856,7 @@ setupStartButton.addEventListener('click', () => {
 // que se confirme de nuevo desde el boton "Comenzar carrera".
 function openCustomizeVehicle() {
   state.setupComplete = false
+  setMessage('', '', false)
   setupNameInput.value = pendingName
   renderColorSwatches()
   setupOverlay.style.display = 'flex'
@@ -882,6 +887,222 @@ const input = {
   accelerate: false,
   brake: false,
 }
+
+/* ------------------------------------------------------------------
+ * SONIDO: todo sintetizado con Web Audio API (sin archivos de audio),
+ * asi que no hay nada que descargar. El motor es un oscilador
+ * continuo cuyo pitch y volumen se ajustan cada frame segun
+ * state.speed; los demas sonidos (choque, cuenta regresiva, meta)
+ * son disparos cortos que se crean y se descartan al terminar.
+ * ------------------------------------------------------------------ */
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)()
+
+// Osciladores base: dos "cilindros" ligeramente desafinados entre si, para que
+// se refuercen y generen ese leve "batido" (beating) de un motor real en vez
+// de un tono electronico limpio.
+const engineOsc1 = audioCtx.createOscillator()
+const engineOsc2 = audioCtx.createOscillator()
+engineOsc1.type = 'sawtooth'
+engineOsc2.type = 'sawtooth'
+engineOsc2.detune.value = 9 // desafinacion sutil, en cents
+
+// Distorsion (waveshaper): convierte la onda diente-de-sierra limpia en algo
+// con armonicos "sucios", que es lo que el oido asocia con combustion real
+// en vez de un synth. Sin esto, por mas capas que agregues, sigue sonando
+// "electronico".
+function makeDistortionCurve(amount) {
+  const samples = 256
+  const curve = new Float32Array(samples)
+  for (let i = 0; i < samples; i += 1) {
+    const x = (i * 2) / samples - 1
+    curve[i] = ((3 + amount) * x * 20 * (Math.PI / 180)) / (Math.PI + amount * Math.abs(x))
+  }
+  return curve
+}
+const engineDistortion = audioCtx.createWaveShaper()
+engineDistortion.curve = makeDistortionCurve(25)
+
+// LFO de "pulso de cilindro": modula el volumen a un ritmo relacionado con
+// las RPM, simulando las explosiones individuales en vez de un zumbido
+// continuo. Esto es lo que mas aporta a que "se sienta" como motor.
+const engineLfo = audioCtx.createOscillator()
+const engineLfoGain = audioCtx.createGain()
+engineLfo.type = 'sine'
+engineLfo.frequency.value = 35
+engineLfoGain.gain.value = 0.35
+
+// Ruido filtrado: aporta el "roce"/soplido de escape, para que no suene a
+// tono puro sino a aire y combustion.
+const engineNoiseBuffer = audioCtx.createBuffer(1, audioCtx.sampleRate * 2, audioCtx.sampleRate)
+const engineNoiseData = engineNoiseBuffer.getChannelData(0)
+for (let i = 0; i < engineNoiseData.length; i += 1) {
+  engineNoiseData[i] = Math.random() * 2 - 1
+}
+const engineNoise = audioCtx.createBufferSource()
+engineNoise.buffer = engineNoiseBuffer
+engineNoise.loop = true
+const engineNoiseFilter = audioCtx.createBiquadFilter()
+engineNoiseFilter.type = 'bandpass'
+engineNoiseFilter.frequency.value = 700
+engineNoiseFilter.Q.value = 0.8
+const engineNoiseGain = audioCtx.createGain()
+engineNoiseGain.gain.value = 0
+
+// Filtro principal: le da "cuerpo" grave al conjunto, como el bloque del motor.
+const engineFilter = audioCtx.createBiquadFilter()
+engineFilter.type = 'lowpass'
+engineFilter.frequency.value = 200
+engineFilter.Q.value = 1.2
+
+const engineGain = audioCtx.createGain()
+const engineMasterGain = audioCtx.createGain() // <- agrega esta línea
+engineGain.gain.value = 0
+engineMasterGain.gain.value = 0 // <- agrega esta línea, empieza en silencio
+
+// Conexiones: osciladores -> distorsion -> filtro -> gain (modulado por el
+// LFO de pulso) -> salida. El ruido se suma en paralelo, tambien modulado.
+engineOsc1.connect(engineDistortion)
+engineOsc2.connect(engineDistortion)
+engineDistortion.connect(engineFilter)
+engineFilter.connect(engineGain)
+engineLfo.connect(engineLfoGain)
+engineLfoGain.connect(engineGain.gain)
+engineGain.connect(engineMasterGain) // <- el LFO sigue modulando engineGain libremente...
+engineMasterGain.connect(audioCtx.destination) // <- ...pero el silencio real se controla aquí, sin LFO
+engineNoise.connect(engineNoiseFilter)
+engineNoiseFilter.connect(engineNoiseGain)
+engineNoiseGain.connect(audioCtx.destination)
+
+engineOsc1.start()
+engineOsc2.start()
+engineLfo.start()
+engineNoise.start()
+
+function updateEngineSound() {
+  if (!state.raceStarted || state.raceFinished) {
+    engineMasterGain.gain.setTargetAtTime(0, audioCtx.currentTime, 0.15)
+    engineNoiseGain.gain.setTargetAtTime(0, audioCtx.currentTime, 0.15)
+    return
+  }
+
+  const speedRatio = state.speed / state.maxSpeed
+  const baseFreq = 45 + speedRatio * 130
+
+  engineOsc1.frequency.setTargetAtTime(baseFreq, audioCtx.currentTime, 0.08)
+  engineOsc2.frequency.setTargetAtTime(baseFreq, audioCtx.currentTime, 0.08)
+  engineLfo.frequency.setTargetAtTime(baseFreq / 2, audioCtx.currentTime, 0.08) // el pulso sigue el "ritmo" del motor
+  engineFilter.frequency.setTargetAtTime(250 + speedRatio * 900, audioCtx.currentTime, 0.08)
+  engineMasterGain.gain.setTargetAtTime(1, audioCtx.currentTime, 0.08) 
+  engineNoiseGain.gain.setTargetAtTime(0.01 + speedRatio * 0.045, audioCtx.currentTime, 0.08)
+}
+
+function playCollisionSound() {
+  const bufferSize = audioCtx.sampleRate * 0.15
+  const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate)
+  const data = buffer.getChannelData(0)
+  for (let i = 0; i < bufferSize; i += 1) {
+    data[i] = (Math.random() * 2 - 1) * (1 - i / bufferSize)
+  }
+
+  const noise = audioCtx.createBufferSource()
+  noise.buffer = buffer
+
+  const filter = audioCtx.createBiquadFilter()
+  filter.type = 'lowpass'
+  filter.frequency.value = 900
+
+  const gain = audioCtx.createGain()
+  gain.gain.value = 0.5
+
+  noise.connect(filter)
+  filter.connect(gain)
+  gain.connect(audioCtx.destination)
+  noise.start()
+}
+
+function playCountdownBeep(isFinalStep) {
+  const oscillator = audioCtx.createOscillator()
+  const gain = audioCtx.createGain()
+
+  oscillator.type = 'sine'
+  oscillator.frequency.value = isFinalStep ? 880 : 520
+  gain.gain.setValueAtTime(0.18, audioCtx.currentTime)
+  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.25)
+
+  oscillator.connect(gain)
+  gain.connect(audioCtx.destination)
+  oscillator.start()
+  oscillator.stop(audioCtx.currentTime + 0.25)
+}
+
+function playFinishHorn(playerWon) {
+  const notes = playerWon ? [660, 880] : [440, 330]
+
+  notes.forEach((frequency, index) => {
+    const oscillator = audioCtx.createOscillator()
+    const gain = audioCtx.createGain()
+
+    oscillator.type = 'square'
+    oscillator.frequency.value = frequency
+
+    const startTime = audioCtx.currentTime + index * 0.18
+    gain.gain.setValueAtTime(0.001, startTime)
+    gain.gain.exponentialRampToValueAtTime(0.15, startTime + 0.03)
+    gain.gain.exponentialRampToValueAtTime(0.001, startTime + 0.32)
+
+    oscillator.connect(gain)
+    gain.connect(audioCtx.destination)
+    oscillator.start(startTime)
+    oscillator.stop(startTime + 0.35)
+  })
+}
+
+// Musica de fondo: se carga una vez, se reproduce en loop, y su volumen se
+// controla por separado del motor/efectos para poder mezclarlos.
+const musicGain = audioCtx.createGain()
+musicGain.gain.value = 0.25 // ajusta este numero para el volumen relativo de la musica
+musicGain.connect(audioCtx.destination)
+
+let musicSource = null
+let musicBuffer = null
+
+async function loadMusic(url) {
+  try {
+    const response = await fetch(url)
+    if (!response.ok) {
+      console.error('No se pudo cargar la música:', response.status, url)
+      return
+    }
+    const arrayBuffer = await response.arrayBuffer()
+    musicBuffer = await audioCtx.decodeAudioData(arrayBuffer)
+    console.log('Música cargada correctamente')
+  } catch (error) {
+    console.error('Error cargando música:', error)
+  }
+}
+
+function playMusic() {
+  if (!musicBuffer || musicSource) {
+    return
+  }
+  musicSource = audioCtx.createBufferSource()
+  musicSource.buffer = musicBuffer
+  musicSource.loop = true
+  musicSource.connect(musicGain)
+  musicSource.start()
+}
+
+loadMusic(`${import.meta.env.BASE_URL}race-music.mp3`)
+
+// Desbloquea el audio y arranca la musica en el primer gesto del usuario
+// dentro de la antesala (clic en un color, en el campo de nombre, etc.),
+// en vez de esperar al boton "Comenzar carrera". { once: true } hace que
+// este listener se autodestruya despues de dispararse una vez.
+function unlockAudioAndPlayMusic() {
+  audioCtx.resume()
+  playMusic()
+}
+setupOverlay.addEventListener('pointerdown', unlockAudioAndPlayMusic, { once: true })
 
 const clock = new THREE.Clock()
 
@@ -975,10 +1196,12 @@ function updateCountdown(deltaTime) {
   if (state.countdownStep > 0) {
     countdownLabel.textContent = String(state.countdownStep)
     state.countdownStepTimer = 1
+    playCountdownBeep(false)
   } else if (state.countdownStep === 0) {
     countdownLabel.textContent = '¡YA!'
     countdownLabel.classList.add('go')
     state.countdownStepTimer = 0.6
+    playCountdownBeep(true)
   } else {
     countdownLabel.classList.add('hidden')
     state.raceStarted = true
@@ -1010,19 +1233,22 @@ function finishRace() {
   finishLine.flagMaterial.emissive.setHex(state.winner.userData.color)
  
   const youWon = state.winner === playerCar
+  playFinishHorn(youWon)
   const isLastLevel = state.level === trackLevels.length
  
   if (youWon && !isLastLevel) {
     state.pendingLevelUp = true
     restartLevel1Button.classList.add('hidden')
     customizeVehicleButton.classList.add('hidden')
+    retryLevelButton.textContent = `Siguiente nivel (${state.level + 1})`
     setMessage(
       `¡Nivel ${state.level} superado!`,
-      `Terminaste primero/a. ${restartHint.charAt(0).toUpperCase() + restartHint.slice(1)} para pasar al nivel ${state.level + 1}, con curvas más cerradas y rivales más rápidos.`,
+      `Terminaste primero/a. Vamos al nivel ${state.level + 1}, con curvas más cerradas y rivales más rápidos.`,
       true,
     )
   } else if (youWon) {
     restartLevel1Button.classList.remove('hidden')
+    retryLevelButton.textContent = `Reintentar`
     customizeVehicleButton.classList.remove('hidden')
     setMessage(
       '¡Circuito completo!',
@@ -1031,6 +1257,7 @@ function finishRace() {
     )
   } else if (isLastLevel) {
     restartLevel1Button.classList.remove('hidden')
+    retryLevelButton.textContent = `Reintentar`
     customizeVehicleButton.classList.remove('hidden')
     setMessage(
       `${state.winner.userData.name} Gano!`,
@@ -1039,6 +1266,7 @@ function finishRace() {
     )
   } else {
     restartLevel1Button.classList.add('hidden')
+    retryLevelButton.textContent = `Reintentar`
     customizeVehicleButton.classList.add('hidden')
     setMessage(
       `${state.winner.userData.name} Gano!`,
@@ -1055,6 +1283,7 @@ function handlePlayerCollision() {
     return
   }
 
+  playCollisionSound()
   state.speed *= 0.62
   state.collisionTimer = 0.65
 }
@@ -1184,7 +1413,7 @@ function checkObstacleCollisions() {
     const arcDistance = Math.abs(obstacle.t - playerCar.userData.t) * curveLength
     const lateralDiff = Math.abs(obstacle.lateralOffset - playerCar.userData.lateralOffset)
 
-    if (arcDistance < 2.6 && lateralDiff < 1.6) {
+    if (arcDistance < 3.38 && lateralDiff < 2.1) {
       handlePlayerCollision()
       // Empuja al jugador con mas fuerza que un choque con un rival, para que
       // se note claramente que golpeo un obstaculo fijo y no quede "pegado" a el.
@@ -1216,6 +1445,7 @@ function updateSunFollow() {
 
 function animate() {
   const deltaTime = Math.min(clock.getDelta(), 0.05)
+  updateEngineSound()
 
   if (!state.raceStarted) {
     if (state.setupComplete) {
