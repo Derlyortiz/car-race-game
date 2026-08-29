@@ -836,6 +836,7 @@ setupNameInput.addEventListener('input', () => {
 })
 
 setupStartButton.addEventListener('click', () => {
+  audioUnlocked = true
   audioCtx.resume() // en Chrome hay que "despertar" el contexto de audio con un click del usuario
   playMusic()
   const finalName = pendingName.trim() || 'Piloto'
@@ -1065,6 +1066,7 @@ musicGain.connect(audioCtx.destination)
 
 let musicSource = null
 let musicBuffer = null
+let audioUnlocked = false
 
 async function loadMusic(url) {
   try {
@@ -1076,6 +1078,9 @@ async function loadMusic(url) {
     const arrayBuffer = await response.arrayBuffer()
     musicBuffer = await audioCtx.decodeAudioData(arrayBuffer)
     console.log('Música cargada correctamente')
+    if (audioUnlocked) {
+      playMusic()
+    }
   } catch (error) {
     console.error('Error cargando música:', error)
   }
@@ -1099,6 +1104,7 @@ loadMusic(`${import.meta.env.BASE_URL}race-music.mp3`)
 // en vez de esperar al boton "Comenzar carrera". { once: true } hace que
 // este listener se autodestruya despues de dispararse una vez.
 function unlockAudioAndPlayMusic() {
+  audioUnlocked = true
   audioCtx.resume()
   playMusic()
 }
